@@ -42,6 +42,7 @@ using sock_t = int;
 #include "tracker_source.h"    // /sinew OSC-in port (39539)
 #include "vr_source.h"         // /vr OSC-in port (39541)
 #include "vr_tracker_sink.h"   // 6DOF OSC-out port (39542)
+#include "pose_sink.h"         // solved-body render port (the PoseSink the solve drives)
 
 // ── small 4x4 row-major math ─────────────────────────────────────────────────
 static void mul4(const float *A, const float *B, float *C) {
@@ -642,6 +643,27 @@ static void skin(std::vector<std::array<float, 3>> &verts) {
 	}
 }
 
+// ── PoseSink adapter: render a solved frame in polyscope ─────────────────────
+// The solve emits the neutral per-joint world poses here each frame; this
+// adapter presents the skinned body (the frame's deformed verts).  Making the
+// render flow through the port revives the previously-dead PoseSink and is the
+// seam the doc's other sinks (SteamVR, VMC) can hang off the same solve pass.
+struct PolyscopePoseSinkCtx {
+	polyscope::SurfaceMesh *mesh;
+	std::vector<std::array<float, 3>> *verts;
+	const bool *showMesh;
+};
+static void polyscope_pose_emit(void *ctx, const SinewJointPose *joints, int n, double time_s) {
+	(void)joints;  // the skeleton; the deformed mesh (verts) is this frame's solved body
+	(void)n;
+	(void)time_s;
+	PolyscopePoseSinkCtx *c = (PolyscopePoseSinkCtx *)ctx;
+	c->mesh->updateVertexPositions(*c->verts);
+	c->mesh->setEnabled(*c->showMesh);
+}
+static void polyscope_pose_close(void *) {
+}
+
 int main() {
 	polyscope::options::verbosity = 3;
 	polyscope::options::programName = "sinew — ANNY body";
@@ -762,6 +784,11 @@ int main() {
 	bool rootFootLock = true, showAxes = true, showMesh = true, showDevices = true;
 	bool hmdRoot = std::getenv("SINEW_HMD_ROOT") != nullptr;  // parity with live_body's SINEW_* envs
 	bool vrIk = std::getenv("SINEW_VR_IK") != nullptr;
+
+	// The solved frame is presented through the PoseSink port (polyscope adapter).
+	PolyscopePoseSinkCtx posectx{mesh, &verts, &showMesh};
+	PoseSink poseSink{&posectx, polyscope_pose_emit, polyscope_pose_close};
+
 	polyscope::state::userCallback = [&]() {
 		if (g_phenoUpdate.exchange(false)) {  // a /sinew/pheno message arrived → live phenotype switch
 			{
@@ -924,8 +951,22 @@ int main() {
 			v[1] += off3[1];
 			v[2] += off3[2];
 		}
-		mesh->updateVertexPositions(verts);
-		mesh->setEnabled(showMesh);
+		// Present the solved frame through the PoseSink: build the neutral joint
+		// poses (world-frame quat + position incl. root offset) and emit; the
+		// polyscope adapter renders the skinned body.
+		SinewJointPose joints[SOMA_J];
+		for (int j = 0; j < SOMA_J; j++) {
+			float q[4];
+			matToQuat(&g_jointRot[j * 9], q);
+			joints[j].qw = q[0];
+			joints[j].qx = q[1];
+			joints[j].qy = q[2];
+			joints[j].qz = q[3];
+			joints[j].x = g_jointPos[j * 3] + g_rootOffset[0];
+			joints[j].y = g_jointPos[j * 3 + 1] + g_rootOffset[1];
+			joints[j].z = g_jointPos[j * 3 + 2] + g_rootOffset[2];
+		}
+		poseSink.emit(poseSink.ctx, joints, SOMA_J, ImGui::GetTime());
 
 		// Tracker-axis gizmos: each tracked joint gets 3 axis segments at its position + orientation.
 		if (showAxes) {
