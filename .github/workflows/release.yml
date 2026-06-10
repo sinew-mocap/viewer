@@ -51,12 +51,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p pkg
-          # sinew_view is the self-contained FFI lib (.dll/.dylib, PREFIX ""), with
-          # the smoke loader beside it. anny_demo needs private baked rig headers and
-          # is not built here, so it is intentionally absent from the release.
-          find build \( -name 'sinew_view.dll' -o -name 'sinew_view.dylib' \
-                        -o -name 'sinew_view_smoke' -o -name 'sinew_view_smoke.exe' \) \
-               -maxdepth 3 -type f -exec cp {} pkg/ \;
+          # anny_demo is the GUI viewer (its baked rig headers are committed, so it
+          # builds); sinew_view is the FFI lib + smoke loader; lbs.spv is the Vulkan
+          # LBS kernel it loads at runtime.  soma_pheno.bin (110 MB model) is an
+          # optional runtime asset shipped separately — anny_demo falls back to the
+          # baked rig without it.
+          find build -maxdepth 4 -type f \( \
+                        -name 'anny_demo' -o -name 'anny_demo.exe' \
+                        -o -name 'sinew_view.dll' -o -name 'sinew_view.dylib' \
+                        -o -name 'sinew_view_smoke' -o -name 'sinew_view_smoke.exe' \
+                        -o -name 'lbs.spv' \) \
+               -exec cp {} pkg/ \;
           ls -la pkg
           ( cd pkg && cmake -E tar cf "../${{ matrix.asset }}" --format=zip . )
 
