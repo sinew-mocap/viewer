@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and release (e.g. v0.4.0)
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: sinew-viewer-windows-x64.zip
+          - os: macos-latest
+            asset: sinew-viewer-macos.zip
+    steps:
+      # Same sibling layout as CI: viewer -> solve -> mount_drift.
+      - uses: actions/checkout@v4
+        with:
+          path: viewer
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/checkout@v4
+        with:
+          repository: sinew-mocap/solve
+          path: solve
+          token: ${{ secrets.SINEW_CI_TOKEN || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          repository: sinew-mocap/mount_drift
+          path: mount_drift
+          token: ${{ secrets.SINEW_CI_TOKEN || github.token }}
+
+      - name: Configure
+        run: cmake -S viewer -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Stage assets
+        shell: bash
+        run: |
+          mkdir -p pkg
+          # sinew_view is the self-contained FFI lib (.dll/.dylib, PREFIX ""), with
+          # the smoke loader beside it. anny_demo needs private baked rig headers and
+          # is not built here, so it is intentionally absent from the release.
+          find build \( -name 'sinew_view.dll' -o -name 'sinew_view.dylib' \
+                        -o -name 'sinew_view_smoke' -o -name 'sinew_view_smoke.exe' \) \
+               -maxdepth 3 -type f -exec cp {} pkg/ \;
+          ls -la pkg
+          ( cd pkg && cmake -E tar cf "../${{ matrix.asset }}" --format=zip . )
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: ${{ matrix.asset }}
+          fail_on_unmatched_files: true
