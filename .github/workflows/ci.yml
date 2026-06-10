@@ -18,7 +18,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          # macOS (Unix Makefiles) supports a compiler launcher directly. MSVC's
+          # MSBuild does not, so the Windows job builds with Ninja so sccache can
+          # wrap cl.exe.
+          - os: macos-latest
+            generator: ""
+          - os: windows-latest
+            generator: "-G Ninja"
     steps:
       # viewer links solve (add_subdirectory(../solve)), which in turn links
       # mount_drift (../mount_drift). Both siblings must sit beside this repo.
@@ -36,11 +43,29 @@ jobs:
           path: mount_drift
           token: ${{ secrets.SINEW_CI_TOKEN || github.token }}
 
+      # Ninja needs cl.exe and the MSVC environment on PATH.
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # sccache caches object files across runs (keyed by content), which cuts the
+      # repeated polyscope/anny_demo compile. The action restores and saves the
+      # GitHub Actions cache itself.
+      - name: Compiler cache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          variant: sccache
+          key: viewer-${{ matrix.os }}
+
       - name: Configure
-        run: cmake -S viewer -B build -DSINEW_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -S viewer -B build ${{ matrix.generator }}
+          -DCMAKE_BUILD_TYPE=Release -DSINEW_TESTS=ON
+          -DCMAKE_C_COMPILER_LAUNCHER=sccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --parallel
 
       - name: Test
-        run: ctest --test-dir build -C Release --output-on-failure --no-tests=ignore
+        run: ctest --test-dir build --output-on-failure --no-tests=ignore
