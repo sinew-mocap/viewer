@@ -9,6 +9,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>  // GetModuleFileNameA for exe-relative asset paths
 using sock_t = SOCKET;
 #else
 #include <arpa/inet.h>
@@ -16,6 +17,9 @@ using sock_t = SOCKET;
 #include <sys/socket.h>
 #include <unistd.h>
 using sock_t = int;
+#ifdef __APPLE__
+#include <mach-o/dyld.h>  // _NSGetExecutablePath
+#endif
 #endif
 
 #include <array>
@@ -28,6 +32,7 @@ using sock_t = int;
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -43,6 +48,46 @@ using sock_t = int;
 #include "vr_source.h"         // /vr OSC-in port (39541)
 #include "vr_tracker_sink.h"   // 6DOF OSC-out port (39542)
 #include "pose_sink.h"         // solved-body render port (the PoseSink the solve drives)
+
+// Resolve a runtime asset (soma_pheno.bin, lbs.spv): prefer a copy next to the
+// executable, so a scoop/brew shim launched from any working directory still finds
+// it; fall back to the bare name (the working directory) for an in-tree run.
+static std::string asset_path(const char *name) {
+	std::string dir;
+#ifdef _WIN32
+	char buf[MAX_PATH];
+	DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+	if (n > 0 && n < MAX_PATH) {
+		std::string p(buf, n);
+		size_t s = p.find_last_of("\\/");
+		if (s != std::string::npos) dir = p.substr(0, s + 1);
+	}
+#elif defined(__APPLE__)
+	char buf[4096];
+	uint32_t sz = sizeof buf;
+	if (_NSGetExecutablePath(buf, &sz) == 0) {
+		std::string p(buf);
+		size_t s = p.find_last_of('/');
+		if (s != std::string::npos) dir = p.substr(0, s + 1);
+	}
+#else
+	char buf[4096];
+	ssize_t n = readlink("/proc/self/exe", buf, sizeof buf);
+	if (n > 0) {
+		std::string p(buf, (size_t)n);
+		size_t s = p.find_last_of('/');
+		if (s != std::string::npos) dir = p.substr(0, s + 1);
+	}
+#endif
+	if (!dir.empty()) {
+		std::string beside = dir + name;
+		if (FILE *f = fopen(beside.c_str(), "rb")) {
+			fclose(f);
+			return beside;
+		}
+	}
+	return name;  // fall back to the working directory
+}
 
 // ── small 4x4 row-major math ─────────────────────────────────────────────────
 static void mul4(const float *A, const float *B, float *C) {
@@ -692,7 +737,7 @@ int main() {
 		}
 	}
 	// Load the phenotype asset; if present, recompute the body from g_ident.
-	g_havePheno = (pheno_load("soma_pheno.bin") == 0);
+	g_havePheno = (pheno_load(asset_path("soma_pheno.bin").c_str()) == 0);
 	// A specific phenotype can be pinned at startup via SOMA_IDENT (11 comma-separated floats),
 	// so a chosen body loads without touching the sliders (e.g. for a looped animation demo).
 	if (const char *env = std::getenv("SOMA_IDENT")) {
@@ -723,7 +768,7 @@ int main() {
 			}
 		}
 	}
-	g_useVk = (vk_lbs_init("lbs.spv", g_bindV.data(), g_denseW.data(), SOMA_V, SOMA_J) == 0);
+	g_useVk = (vk_lbs_init(asset_path("lbs.spv").c_str(), g_bindV.data(), g_denseW.data(), SOMA_V, SOMA_J) == 0);
 	std::fprintf(stderr, "anny_demo: per-frame LBS on %s\n", g_useVk ? "GPU (Vulkan)" : "CPU");
 
 	for (int j = 0; j < SOMA_J; j++) {

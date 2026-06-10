@@ -41,6 +41,22 @@ jobs:
           path: mount_drift
           token: ${{ secrets.SINEW_CI_TOKEN || github.token }}
 
+      - name: Fetch ANNY phenotype model
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The phenotype model ships compressed in the data-asset release; place
+          # the decompressed soma_pheno.bin under assets/ so the build bundles it
+          # next to anny_demo (the viewer renders the full ANNY body, not just the
+          # baked rest rig).
+          mkdir -p viewer/assets
+          gh release download v1 --repo sinew-mocap/viewer --pattern soma_pheno.bin.zst --dir viewer/assets --clobber
+          python -m pip install --quiet zstandard
+          python -c "import zstandard; d=zstandard.ZstdDecompressor(); fi=open('viewer/assets/soma_pheno.bin.zst','rb'); fo=open('viewer/assets/soma_pheno.bin','wb'); d.copy_stream(fi,fo); fo.close(); fi.close()"
+          rm -f viewer/assets/soma_pheno.bin.zst
+          ls -la viewer/assets
+
       - name: Configure
         run: cmake -S viewer -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -51,16 +67,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p pkg
-          # anny_demo is the GUI viewer (its baked rig headers are committed, so it
-          # builds); sinew_view is the FFI lib + smoke loader; lbs.spv is the Vulkan
-          # LBS kernel it loads at runtime.  soma_pheno.bin (110 MB model) is an
-          # optional runtime asset shipped separately — anny_demo falls back to the
-          # baked rig without it.
+          # anny_demo is the GUI viewer; sinew_view is the FFI lib + smoke loader;
+          # lbs.spv is the Vulkan LBS kernel; soma_pheno.bin is the phenotype model
+          # the build copied beside anny_demo.  anny_demo resolves these next to its
+          # own executable, so the bundle works wherever a shim launches it.
           find build -maxdepth 4 -type f \( \
                         -name 'anny_demo' -o -name 'anny_demo.exe' \
                         -o -name 'sinew_view.dll' -o -name 'sinew_view.dylib' \
                         -o -name 'sinew_view_smoke' -o -name 'sinew_view_smoke.exe' \
-                        -o -name 'lbs.spv' \) \
+                        -o -name 'lbs.spv' -o -name 'soma_pheno.bin' \) \
                -exec cp {} pkg/ \;
           ls -la pkg
           ( cd pkg && cmake -E tar cf "../${{ matrix.asset }}" --format=zip . )
