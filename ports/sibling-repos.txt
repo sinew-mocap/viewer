@@ -1,0 +1,6 @@
+# viewer/ports — sibling repos to clone side-by-side in ~/.
+#
+# build (link): solve         # solve_core (FK/LBS); pulls mount_drift (vkc) transitively
+# network (OSC in):  /sinew/tracker on UDP 39539  <- driver
+#         (OSC in):  /vr/* on UDP 39541           <- vr_bridge
+#         (OSC out): 6DOF datagrams on UDP 39542  -> vr_bridge
