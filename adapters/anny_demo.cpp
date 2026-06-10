@@ -39,6 +39,9 @@ using sock_t = int;
 #include "vk_lbs_host.h"
 #include "soma_rig.h"
 #include "channel_map.h"  // viewer/core: the neutral /sinew channel -> SOMA name map
+#include "tracker_source.h"    // /sinew OSC-in port (39539)
+#include "vr_source.h"         // /vr OSC-in port (39541)
+#include "vr_tracker_sink.h"   // 6DOF OSC-out port (39542)
 
 // ── small 4x4 row-major math ─────────────────────────────────────────────────
 static void mul4(const float *A, const float *B, float *C) {
@@ -224,6 +227,42 @@ static void parsePheno(const uint8_t *buf, int len) {
 	g_phenoUpdate.store(true);
 }
 
+// ── Port adapters: the three UDP boundaries as source/sink ports ─────────────
+// Thin wrappers over the sockets so each boundary reads as a declared port; the
+// parse/solve logic is unchanged.  UdpSourceCtx backs both TrackerSource
+// (/sinew 39539) and VrSource (/vr 39541) — same recvfrom shape.
+struct UdpSourceCtx {
+	sock_t s;
+};
+static int udp_source_next(void *ctx, uint8_t *osc, size_t cap, size_t *len) {
+	UdpSourceCtx *c = (UdpSourceCtx *)ctx;
+	int n = recvfrom(c->s, (char *)osc, (int)cap, 0, nullptr, nullptr);
+	if (n > 0) {
+		*len = (size_t)n;
+		return 1;
+	}
+	return n == 0 ? 0 : -1;
+}
+static void udp_source_close(void *) {
+}
+
+// VrTrackerSink: the 6DOF body-out to driver_sinew (one 29-byte datagram per
+// tracker: wire index + position(12) + quaternion(16)).
+struct VrTrackerSinkCtx {
+	sock_t s;
+	sockaddr_in dst;
+};
+static void vr_tracker_send(void *ctx, int joint, const float pos[3], const float quat[4]) {
+	VrTrackerSinkCtx *c = (VrTrackerSinkCtx *)ctx;
+	unsigned char pkt[29];
+	pkt[0] = (unsigned char)joint;
+	memcpy(pkt + 1, pos, 12);
+	memcpy(pkt + 13, quat, 16);
+	sendto(c->s, (const char *)pkt, 29, 0, (sockaddr *)&c->dst, sizeof c->dst);
+}
+static void vr_tracker_close(void *) {
+}
+
 static void oscThread() {
 #ifdef _WIN32
 	WSADATA wsa;
@@ -238,10 +277,13 @@ static void oscThread() {
 		std::fprintf(stderr, "anny_demo: cannot bind UDP 39539 (driver already on it?)\n");
 		return;
 	}
+	UdpSourceCtx srcctx{s};
+	TrackerSource src{&srcctx, udp_source_next, udp_source_close};
 	uint8_t buf[2048];
 	for (;;) {
-		int n = recvfrom(s, (char *)buf, sizeof buf, 0, nullptr, nullptr);
-		if (n > 0) {
+		size_t len = 0;
+		if (src.next(src.ctx, buf, sizeof buf, &len) == 1) {
+			int n = (int)len;
 			if (n >= 11 && memcmp(buf, "/sinew/root", 11) == 0) {
 				parseRoot(buf, n);
 			} else if (n >= 12 && memcmp(buf, "/sinew/pheno", 12) == 0) {
@@ -416,11 +458,16 @@ static void vrOscThread() {  // second listener: /vr/* on UDP 39541 (SteamVR via
 		std::fprintf(stderr, "anny_demo: cannot bind UDP 39541 (hmd_reader port)\n");
 		return;
 	}
+	UdpSourceCtx srcctx{s};
+	VrSource src{&srcctx, udp_source_next, udp_source_close};
 	uint8_t buf[2048];
 	for (;;) {
-		int n = recvfrom(s, (char *)buf, sizeof buf, 0, nullptr, nullptr);
-		if (n > 0 && n >= 4 && memcmp(buf, "/vr/", 4) == 0) {
-			parseVr(buf, n);
+		size_t len = 0;
+		if (src.next(src.ctx, buf, sizeof buf, &len) == 1) {
+			int n = (int)len;
+			if (n >= 4 && memcmp(buf, "/vr/", 4) == 0) {
+				parseVr(buf, n);
+			}
 		}
 	}
 }
@@ -486,6 +533,8 @@ static void driveVrThread() {
 	dst.sin_family = AF_INET;
 	dst.sin_port = htons(39542);
 	dst.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	VrTrackerSinkCtx sinkctx{s, dst};
+	VrTrackerSink sink{&sinkctx, vr_tracker_send, vr_tracker_close};
 	int nt = CHANNEL_MAP_COUNT;
 	std::vector<int> idx(nt);
 	for (int i = 0; i < nt; i++) {
@@ -511,11 +560,7 @@ static void driveVrThread() {
 				float p[3] = {m[3] + g_rootOffset[0], m[7] + g_rootOffset[1], m[11] + g_rootOffset[2]};
 				float rr[9] = {m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]}, q[4];
 				matToQuat(rr, q);
-				unsigned char pkt[29];
-				pkt[0] = (unsigned char)i;
-				memcpy(pkt + 1, p, 12);
-				memcpy(pkt + 13, q, 16);
-				sendto(s, (const char *)pkt, 29, 0, (sockaddr *)&dst, sizeof dst);
+				sink.send(sink.ctx, i, p, q);  // wire index i -> driver_sinew
 			}
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(16));  // 62.5 Hz
